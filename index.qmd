@@ -1,0 +1,1007 @@
+--- 
+title: "화재 보험 산정"
+author: "6조 : 구경민, 신태선, 오윤지, 이재우"
+format: 
+  dashboard:
+    theme: flatly
+    css: red-white.css
+jupyter: python3
+--- 
+
+# 0. 들어가는 말
+
+## Row {height=50%}
+
+### Column {width=50%}
+::: {.card title="Ames Fire Insurance"}
+<img src="images/ames.png" style="width: 100%; height: auto; border-radius: 12px;" />
+:::
+
+### Column {width=50%}
+::: {.card title="🔥 우리는 LS 화재보험사"}
+
+에임즈(Ames) 시에 **새로운 보험상품**을 출시하려 합니다.  
+그런데 이 지역은 **자재별 화재 위험도**가 어떤지,  
+**보험금은 얼마로 책정해야** 수익이 날 수 있을지,  
+아무도 정확히 모릅니다.
+
+- 📦 주택 가격은 어떤지  
+- 🧱 자재에 따른 화재 위험도는 어떤지  
+- 🔥 화재 위험도와 가격의 관계가 어떤지 
+- 💰 보험 수익은 어디서 발생하는지  
+
+**이제 데이터를 기반으로,  
+에임즈 시의 보험료를 직접 산정해보겠습니다.**
+
+:::
+
+
+## Row {height=50%}
+### Column {width=50%}
+::: {.card title="📌 프로젝트 배경"}
+
+최근 **기후 변화**와 **노후화된 주택** 문제로,  
+미국 내 화재 사고가 증가하고 있습니다.  
+캘리포니아 산불 사례처럼, 보험사는 막대한 손실을 입을 수 있습니다.
+
+그렇다면, 우리는 **사전 예측과 리스크 분석을 통해**  
+보다 정밀한 보험료 책정이 가능할까요?
+
+**Ames Housing 데이터를 기반으로  
+데이터 기반 화재보험 모델을 구축합니다.**
+:::
+
+
+### Column {width=50%}
+::: {.card title="🧭 분석 흐름 요약"}
+1️⃣ **화재 위험 지역 시각화**  
+2️⃣ **크기 대비 가격 분포 분석**  
+3️⃣ **화재 위험 지표와 가격 상관관계 분석**  
+4️⃣ **보험료 산정 모델링**  
+5️⃣ **손익분기점 분석**  
+:::
+
+# 1. 화재 위험 지역 시각화
+
+## Row {height=60%}
+
+### Column {width=60%}
+::: {.card title="🗺️ 1. 위험도 기반 주택 시각화"}
+```{python}
+#| echo: false
+import os
+import shutil
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import warnings
+import scipy as sp
+import scipy.stats as st
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+import statsmodels.formula.api as smf
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, RidgeCV, LassoCV
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.metrics import mean_squared_error, root_mean_squared_error
+from sklearn.impute import SimpleImputer
+from sklearn.datasets import load_iris
+from sklearn import linear_model
+from tqdm import tqdm
+warnings.filterwarnings('ignore')
+
+os.chdir('./src')
+from dataloader import DataLoader
+
+# load data 
+
+dataloader = DataLoader()
+dataset = dataloader.load_data()
+```
+
+```{python}
+#| echo: false
+import pandas as pd
+import plotly.graph_objects as go
+
+dataset['PricePerArea'] = dataset['SalePrice'] / dataset['LotArea']
+# ---------------------------
+# 💰 지역별 '평단가' 기반 등급 분류 (5단계)
+# ---------------------------
+price_per_area_by_neigh = dataset['PricePerArea']
+q20 = price_per_area_by_neigh.quantile(0.20)
+q40 = price_per_area_by_neigh.quantile(0.40)
+q60 = price_per_area_by_neigh.quantile(0.60)
+q80 = price_per_area_by_neigh.quantile(0.80)
+
+def classify_price_grade(price):
+    if price <= q20:
+        return 1
+    elif price <= q40:
+        return 2
+    elif price <= q60:
+        return 3
+    elif price <= q80:
+        return 4
+    else:
+        return 5
+
+
+
+#  위험도 평균 열 생성
+dataset['Risk_Avg'] = (
+    dataset['Risk_RoofMatl'] * 0.30 +
+    dataset['Risk_Exterior1st'] * 0.30 +
+    dataset['Risk_Exterior2nd'] * 0.10 +
+    dataset['Risk_MasVnrType'] * 0.10 +
+    dataset['Risk_WoodDeckSF'] * 0.2
+)
+
+# 위험도 평균을 5단계로 그룹화
+dataset['Risk_Level'] = dataset['Risk_Avg'].round()
+
+# 화재 위험도별 평단가 두개다 막대그래프로 그래프 그리기 필요 코드
+mean_RiskLevel = dataset.groupby('Risk_Level')['BuildingPricePerTotalSF'].mean()
+
+# 중앙값 평단가 바 그래프 그리기 위해 필요 코드
+median_RiskLevel = dataset.groupby('Risk_Level')['BuildingPricePerTotalSF'].median()
+
+# 결측값 제거
+
+dataset = dataset.dropna(subset=['BuildingPricePerTotalSF'])
+
+dataset1 = dataset
+
+color_map = {
+    1: '#ffffff',   # White
+    2: '#ffe5e5',   # Very light pink
+    3: '#ff9999',   # Light red
+    4: '#ff4d4d',   # Red-orange
+    5: '#cc0000'    # Deep red
+}
+
+
+layout_mapbox = dict(
+    mapbox=dict(
+        style="open-street-map",  # 💡 깔끔한 기본 스타일
+        center=dict(lat=42.0345, lon=-93.62),
+        zoom=11
+    ),
+    title=dict(
+        text='🔥 Ames 시 화재 위험도 기반 주택 시각화',
+        font=dict(size=22, color='black'),
+        x=0.05,
+        xanchor='left'
+    ),
+    margin=dict(l=20, r=20, t=60, b=20),
+    legend=dict(
+        title=dict(
+            text='<b>위험도 분류</b>',
+            side='top'
+        ),
+        orientation='h', 
+        yanchor='bottom', 
+        y=0.02, 
+        xanchor='center', 
+        x=0.5, 
+        bgcolor='rgba(255, 255, 255, 0.8)', 
+        bordercolor='rgba(200, 200, 200, 0.8)', 
+        borderwidth=1,
+        font=dict(size=12),
+        itemwidth=50,
+        entrywidth=80,
+        valign='middle',
+        traceorder='normal',
+        itemsizing='constant',
+    )
+)
+
+# 주택 마커
+traces = []
+for level, color in color_map.items():
+    df = dataset[dataset['Risk_Level'] == level]
+    traces.append(go.Scattermapbox(
+        lat=df['Latitude'], lon=df['Longitude'],
+        mode='markers',
+        marker=dict(size=7, color=color, opacity=0.6),
+        text='가격: $' + df['SalePrice'].astype(str) + '<br>위험도: ' + df['Risk_Level'].astype(str),
+        name=f'위험도 {level}'
+    ))
+
+
+# 시각화
+fig1 = go.Figure(data=traces, layout=layout_mapbox)
+fig1.show()
+
+```
+:::
+
+
+### Column {width=40%}
+
+
+::: {.card title="📋 2. 화재 위험도 산정 기준표"}
+
+<div style="font-size: 13px; overflow-x: auto;">
+
+|  | 위험도1 | 위험도2 | 위험도3 | 위험도4 | 위험도5 |
+| --- | --- | --- | --- | --- | --- |
+| 지붕 자재 (30%) | Metal | CompShg, Tar&Grv | Roll,    Membran | WdShngl | WdShake |
+| 외벽 재질(30%) | MetalSd, CemntBd, BrkFace... | ImStucc,Stucco | VinylSd, | HdBoard, AsphShn | Wd Sdng, WdShing, Plywood |
+| 외벽 장식 재질(10%) | MetalSd,CemntBd,BrkFace... | Stucco, ImStucc | VinylSd | HdBoard, AsphShn | Wd Sdng, WdShing, Plywood |
+| 외벽 마감재(10%) | BrkFace,Stone,BrkCmn |  |  |  |  |
+| 목재 바닥 넓이(20%) | 0 | 1~100 | 101~250 | 251~400 | 400 |
+
+- **지붕과 외벽**은 화재 시 가장 먼저 타는 **1차적 취약 요소**입니다.  
+- **목재 바닥**은 불씨에 쉽게 착화되며,  
+- **외벽 마감재와 장식**은 상대적으로 위험도는 낮지만 **가연성일 경우 주의가 필요**합니다.
+
+📎 자세한 기준은 NFPA 공식 가이드에서 확인할 수 있습니다.  
+🔗 [NFPA - Preparing Homes for Wildfire](https://www.nfpa.org/education-and-research/wildfire/preparing-homes-for-wildfire)
+</div>
+
+:::
+
+#### Row {height=50%}
+
+::: {.card title="📊 3. 위험도별 주택수량 막대그래프"}
+```{python}
+#| echo: false
+
+cnt_RiskLevel = dataset['Risk_Level'].value_counts().sort_index()
+
+fig, ax = plt.subplots(figsize=(6, 4))
+cnt_RiskLevel.plot(kind='bar', color='skyblue', edgecolor='black', ax=ax)
+
+# 텍스트 설정 (반환값 무시)
+_ = ax.set_xlabel('Risk_Level')
+_ = ax.set_ylabel('# of house by risk level')
+_ = ax.set_title('Risk_level_house_cnt')
+_ = ax.set_xticks(range(len(cnt_RiskLevel)))
+_ = ax.set_xticklabels(cnt_RiskLevel.index.astype(str))
+_ = ax.grid(axis='y', linestyle='--', alpha=0.5)
+_ = plt.xticks(rotation=0)
+
+plt.show()
+```
+:::
+
+
+# 2. 크기 대비 가격 분포 분석
+
+## Row {height=60%}
+
+
+::: {.card title="📊 1. 가격 & 평단 가격 시각화"}
+
+::: {.panel-tabset}
+
+#### 거래가격 지도
+```{python}
+#| echo: false
+# ---------------------------
+# 💰 가격 등급 분류 (5단계)
+# ---------------------------
+price_by_neigh = dataset.groupby('Neighborhood')['SalePrice'].mean()
+q20 = price_by_neigh.quantile(0.20)
+q40 = price_by_neigh.quantile(0.40)
+q60 = price_by_neigh.quantile(0.60)
+q80 = price_by_neigh.quantile(0.80)
+
+def classify_price_grade(neighborhood):
+    price = price_by_neigh[neighborhood]
+    if price <= q20:
+        return 'Very Low'
+    elif price <= q40:
+        return 'Low'
+    elif price <= q60:
+        return 'Normal'
+    elif price <= q80:
+        return 'High'
+    else:
+        return 'Very High'
+
+dataset['PriceGrade'] = dataset['Neighborhood'].apply(classify_price_grade)
+
+# ---------------------------
+# 🎨 색상 매핑
+# ---------------------------
+color_map = {
+    'Very Low': '#ffffff',  # 흰색
+    'Low': '#cce5ff',       # 연한 하늘색
+    'Normal': '#6699cc',    # 중간 파랑
+    'High': '#3366cc',      # 진한 파랑
+    'Very High': '#000080'  # 네이비
+}
+
+# ---------------------------
+# 🧭 지도 설정
+# ---------------------------
+layout_mapbox = dict(
+    mapbox=dict(
+        style="open-street-map",  # 💡 깔끔한 기본 스타일
+        center=dict(lat=42.0345, lon=-93.62),
+        zoom=11
+    ),
+    title=dict(
+        text='💲Ames 시 부동산 거래가격',
+        font=dict(size=22, color='black'),
+        x=0.05,
+        xanchor='left'
+    ),
+    margin=dict(l=20, r=20, t=60, b=20),
+    legend=dict(
+        title=dict(
+            text='<b>부동산 거래가격</b>',
+            side='top'
+        ),
+        orientation='h', 
+        yanchor='bottom', 
+        y=0.02, 
+        xanchor='center', 
+        x=0.5, 
+        bgcolor='rgba(255, 255, 255, 0.8)', 
+        bordercolor='rgba(200, 200, 200, 0.8)', 
+        borderwidth=1,
+        font=dict(size=12),
+        itemwidth=50,
+        entrywidth=80,
+        valign='middle',
+        traceorder='normal',
+        itemsizing='constant',
+    )
+)
+
+# ---------------------------
+# 🏡 주택 마커 (등급별 분리)
+# ---------------------------
+home_traces = []
+for grade, color in color_map.items():
+    subset = dataset[dataset['PriceGrade'] == grade]
+    trace = go.Scattermapbox(
+        lat=subset['Latitude'],
+        lon=subset['Longitude'],
+        mode='markers',
+        marker=dict(size=7, color=color, opacity=0.6),
+        text='거래액 : $' + subset['SalePrice'].astype(int).astype(str),
+        name=f"{grade} Area"
+    )
+    home_traces.append(trace)
+
+
+
+fig2 = go.Figure(data=home_traces, layout=layout_mapbox)
+fig2.show()  # ← 이 줄이 반드시 있어야 합니다!
+
+```
+
+#### Ames 평당 거래 가격
+
+```{python}
+#| echo: false
+
+# ✅ 총 건물 면적 계산
+# TotalSF = TotalBsmtSF + 1stFlrSF + 2ndFlrSF
+# → 지하 + 1층 + 2층을 합친 총 연면적 (평단가 계산 기준)
+dataset['TotalSF'] = dataset['TotalBsmtSF'] + dataset['1stFlrSF'] + dataset['2ndFlrSF']
+
+# ✅ 가중 평균 기반 LandValue, BuildingValue 계산
+alpha = 0.4  # 땅과 건물의 상대적 중요도
+
+# denominator = α × LotArea + (1 - α) × TotalSF
+# → 전체 면적 중 땅과 건물이 차지하는 가중합 (가격 분배 기준)
+denominator = alpha * dataset['LotArea'] + (1 - alpha) * dataset['TotalSF']
+
+# LandValue = (α × LotArea) / (denominator) × SalePrice
+# → 전체 주택 가격 중 땅 면적이 차지하는 비중만큼을 땅값으로 분배
+dataset['LandValue'] = (alpha * dataset['LotArea']) / denominator * dataset['SalePrice']
+
+# BuildingValue = SalePrice - LandValue
+# → 전체 집값에서 땅값을 빼고 남은 것이 건물값 (즉, 피해 대상)
+dataset['BuildingValue'] = dataset['SalePrice'] - dataset['LandValue']
+
+# ✅ 건물 평단가 계산
+# BuildingPricePerTotalSF = BuildingValue / TotalSF
+# → 건물 1평당 단가 = 실제 화재 피해 추정 단가    
+dataset['BuildingPricePerTotalSF'] = (dataset['BuildingValue'] / dataset['TotalSF'])* 35.5832  # (1평 = 3.305 m², 1m² = 35.5832$)
+
+
+# ✅ 등급화 (5분위)
+q20 = dataset['BuildingPricePerTotalSF'].quantile(0.20)
+q40 = dataset['BuildingPricePerTotalSF'].quantile(0.40)
+q60 = dataset['BuildingPricePerTotalSF'].quantile(0.60)
+q80 = dataset['BuildingPricePerTotalSF'].quantile(0.80)
+
+def classify_price_grade(x):
+    if x <= q20:
+        return 'Very Low'
+    elif x <= q40:
+        return 'Low'
+    elif x <= q60:
+        return 'Normal'
+    elif x <= q80:
+        return 'High'
+    else:
+        return 'Very High'
+
+dataset['PriceGrade'] = dataset['BuildingPricePerTotalSF'].apply(classify_price_grade)
+
+# ✅ 색상 매핑
+color_map = {
+    'Very Low': '#ffffff',  # 흰색
+    'Low': '#cce5ff',       # 연한 하늘색
+    'Normal': '#6699cc',    # 중간 파랑
+    'High': '#3366cc',      # 진한 파랑
+    'Very High': '#000080'  # 네이비
+}
+
+# ✅ 소방서 위치 데이터
+fire_stations = pd.DataFrame({
+    'Name': ['Station 1', 'Station 2', 'Station 3'],
+    'Latitude': [42.034862, 42.021596, 42.001115],
+    'Longitude': [-93.615031, -93.649759, -93.609166]
+})
+
+layout_mapbox = dict(
+    mapbox=dict(
+        style="open-street-map",  # 💡 깔끔한 기본 스타일
+        center=dict(lat=42.0345, lon=-93.62),
+        zoom=11
+    ),
+    title=dict(
+        text='💲Ames 시 부동산 평당 거래가격',
+        font=dict(size=22, color='black'),
+        x=0.05,
+        xanchor='left'
+    ),
+    margin=dict(l=20, r=20, t=60, b=20),
+    legend=dict(
+        title='<b>평당 부동산 거래가격</b>', 
+        orientation='h', 
+        yanchor='bottom', 
+        y=0.02, 
+        xanchor='center', 
+        x=0.5, 
+        bgcolor='rgba(255, 255, 255, 0.8)', 
+        bordercolor='rgba(200, 200, 200, 0.8)', 
+        borderwidth=1,
+        font=dict(size=12),
+        itemwidth=100,
+        valign='middle',
+        traceorder='normal',
+        itemsizing='constant'
+    )
+)
+
+# ✅ 주택 마커
+home_traces = []
+for grade, color in color_map.items():
+    subset = dataset[dataset['PriceGrade'] == grade]
+    trace = go.Scattermapbox(
+        lat=subset['Latitude'],
+        lon=subset['Longitude'],
+        mode='markers',
+        marker=dict(size=10, color=color, opacity=0.6),
+        text='총가:$' + subset['SalePrice'].astype(int).astype(str) +
+             '<br>건물 평당 단가:$' + subset['BuildingPricePerTotalSF'].round(1).astype(str),
+        name=f"{grade} Area"
+    )
+    home_traces.append(trace)
+
+
+# ✅ 지도 출력
+fig3 = go.Figure(data=home_traces, layout=layout_mapbox)
+
+
+fig3.show()
+```
+:::
+
+:::
+
+### Column {width=40%}
+
+::: {.card title="📐 2. 평당 단가"}
+
+- $F = \frac{BV}{LA} \cdot  35.5832$
+
+- $BV = SP - LV$
+
+- $LV = (\alpha \cdot LA)/ DM \cdot SP$
+
+- $DM = \alpha \cdot LA + (1-\alpha)\cdot \operatorname{TotalSF}$
+
+- $\operatorname{TotalSF} = \sum_{i=0}^N SF_i$
+---
+- $F$: 피트당 가격
+- $BV$: 빌딩 가격
+- $LA$: 전체 면적
+- $SP$: 부동산 실거래가
+- $LV$: 땅값
+- $\alpha(=0.6)$: 땅값과 건물에 대한 가중치
+- $DM$: denominator
+- $\operatorname{TotalSF}$: 총 건물 면적
+- $SF_i$: 각 층의 총면적($i = \{0, ..., N \} = \{지하, 1층, 2층 \}$)
+- $35.5832$ : 피트 -> 평 변환
+:::
+
+::: {.card title="📉 3. 가격 분포 막대그래프"}
+```{python}
+#| echo: false
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ✅ 한글 폰트 설정
+plt.rcParams['font.family'] = 'Malgun Gothic'  # 윈도우용
+# plt.rcParams['font.family'] = 'AppleGothic'  # Mac용
+plt.rcParams['axes.unicode_minus'] = False     # 마이너스 깨짐 방지
+
+# ✅ 히스토그램 그리기
+plt.figure(figsize=(10, 5))
+sns.histplot(
+    data=dataset,
+    x='BuildingPricePerTotalSF',
+    bins=30,
+    color='#6699cc',
+    edgecolor='black'
+)
+
+# ✅ 제목과 축 레이블
+_ = plt.title( " 건물 평단가 분포", fontsize=14)
+_ = plt.xlabel("건물 평단가 ($/평)", fontsize=12)
+_ = plt.ylabel("주택 수", fontsize=12)
+_ = plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+
+```
+:::
+
+## Row {height=20%}
+::: {.card title="📝 1에 대한 해석"}
+- 기존 데이터셋의 거래금액(SalePrice)은 땅 면적이나 건물 크기 등의 요소를 반영하지 않은 총액 기준
+
+- 우리는 이를 보완하기 위해 **땅의 면적(LotArea)**과 **건물의 총면적(TotalSF)**을 고려하여
+**단위 면적당 가치(평단가)**로 재구성함
+
+- 이로 인해 단순 부동산 거래금액이 아닌 실제 자산 가치 기반의 지역 특성을 반영할 수 있었음
+
+- 결과적으로, 부촌 지역과 일반 지역 간의 가치 분포 차이가 두 지도로 명확히 구분됨
+:::
+
+
+
+
+
+# 3. 화재 위험 지표와 가격 상관관계 분석
+
+
+
+
+## Row {height=40%}
+
+::: {.card title="📊 위험등급에 따른 주택가격 (모수)"}
+
+::: {.panel-tabset}
+
+####  ❓ ANOVA 검정
+- 위험도별 가격 평균 차이 있음
+
+```{python}
+#|echo : false
+dataset1 = dataset1[dataset1['Risk_Level'] != 5]
+dataset = dataset1
+
+
+# 분산분석 과정
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+
+
+model = ols('BuildingPricePerTotalSF ~ C(Risk_Level)',data=dataset).fit()
+anova_results = sm.stats.anova_lm(model, typ=2)
+
+# 아노바 검정 결과
+print("anova result: ", anova_results)
+```
+
+#### ❌ 샤피로 윌크 검정
+```{python}
+import scipy.stats as sp
+W, p = sp.shapiro(model.resid)
+# 아노바 검정 결과
+# 잔차 정규성 검정 결과 출력해야하는 내용 !!!!!!
+print(f'검정통계량: {W:.3f}, 유의확률: {p:.3f}')
+```
+<br>
+
+**정규성 검정 결과 정리**
+
+| 구분 | 내용 |
+|---|---|
+| **해석** | - 귀무가설: 데이터가 정규분포를 따른다.<br>-  대립가설: 데이터가 정규분포를 따르지 않는다.<br>-  유의확률(p=0.000)이 유의수준(α=0.05)보다 매우 작음.<br>-  따라서 귀무가설을 기각함. |
+| **결론** | -  데이터는 정규분포를 따르지 않음. |
+| **앞으로의 방향** | -  정규성 가정이 위배되므로 모수적 검정(t-검정, ANOVA 등) 적용 시 주의 필요<br>-  비모수적 방법(Kruskal-Wallis 등) 고려 권장 |
+
+
+#### ❌ 정규성 검정 Q-Q 플롯
+```{python}
+# echo : false
+# 아노바 검정 결과
+# 잔차 정규성 검정 결과 출력해야하는 내용 !!!!!!
+from scipy.stats import probplot
+_=plt.figure(figsize=(6, 6))
+_=probplot(model.resid, dist="norm", plot=plt)
+# 해석 잔차 정규성 만족안함
+```
+ 
+
+#### ❌ Bartlett 등분산성 검정
+- Bartlett 등분산성 검정 통과
+
+```{python}
+#|echo : false
+# bartlett을 사용한 잔차의 등분산성 검증 결과 등분산성 역시 성립하지 않음
+from scipy.stats import bartlett
+from scipy.stats import kruskal
+groups = [1, 2, 3, 4]
+grouped_residuals = [model.resid[dataset['Risk_Level'] == group] for group in groups]
+test_statistic, p_value = bartlett(*grouped_residuals)
+# 아노바 검정 결과
+# 출력해야 하는 내용!!!
+print(f"검정통계량: {test_statistic}, p-value: {p_value}")
+
+```
+
+<br>
+
+**Bartlett 등분산성 검정 결과 정리**
+
+| 구분 | 내용 |
+|---|---|
+| **해석** | - 귀무가설: 모든 그룹의 분산이 동일하다.<br>- 대립가설: 적어도 하나의 그룹이 다른 분산을 가진다.<br>- 검정통계량: 68.78141877647354<br>- 유의확률(p=7.78e-15)이 유의수준(α=0.05)보다 매우 작음.<br>- 따라서 귀무가설을 기각함. |
+| **결론** | - 위험도 그룹 간 분산이 동일하지 않음.<br>- 등분산성 가정이 위배됨. |
+| **앞으로의 방향** | - 등분산성 가정이 위배되므로 표준 ANOVA 사용 시 주의 필요<br>- 등분산성을 가정하지 않는 Welch ANOVA 고려<br>- 비모수적 방법(Kruskal-Wallis 등) 사용 권장<br>- 데이터 변환(로그 변환 등)을 통한 분산 안정화 고려 가능 |
+
+:::
+:::
+
+### Column {width=50%}
+
+::: {.card title="📊 위험등급에 따른 주택가격 (비모수)"}
+::: {.panel-tabset}
+## ✅ Kruskal-Wallis 검정
+-  Kruskal-Wallis 검정(비모수 검정)을 통해 `위험도별 주택 평단가`의 차이가 통계적으로 유의미한지 확인
+```{python}
+# | echo: false
+# 아노바 검정결과 x 여기부터 비모수 검정 부분 step12 나누는거로 해야할듯
+# 따라서 Kruskal-Wallis 검정 (비모수 검정)을 통해 위험도별 주택 평단가의 차이가 통계적으로 유의미한지 확인
+grouped = [group['BuildingPricePerTotalSF'].values for name, group in dataset.groupby('Risk_Level')]
+
+kruskal_stat, kruskal_p = kruskal(*grouped)
+
+# Kruskal-Wallis 검정결과
+kruskal_result = {
+    "검정통계량 (H)": kruskal_stat,
+    "p-value": kruskal_p,
+    "결론": "✔️ 그룹 간 차이가 유의함 (p < 0.05)" if kruskal_p < 0.05 else "❌ 유의한 차이 없음 (p ≥ 0.05)"
+}
+# 위험도별 주택 평단가 차이가 하나 이상은 존재함을 확인
+# 따라서 사후검정을 통해 어떤 위험도끼리 차이가 있는지 확인
+
+# 출력해야하는 결과
+
+# 딕셔너리를 DataFrame으로 변환하여 표 형식으로 출력
+kruskal_df = pd.DataFrame(data={'값': kruskal_result}).reset_index().rename(columns={'index': '항목'})
+kruskal_df
+```
+
+
+## ✅ Dunn-test 결과
+- Dunn-test(비모수 사후검정) 결과
+
+- 일부 그룹 간 유의한 차이 존재하는지 검정
+- 비모수 사후검정 실시 결과 위험도 2와 기타 위험도 간의 차이만 유의미함
+- 위험도 1,3,4간의 차이는 유의미 하지 않음
+```{python}
+# dunn-test(비모수 사후검정)
+
+import scikit_posthocs as sp
+posthoc = sp.posthoc_dunn(dataset, val_col='BuildingPricePerTotalSF', group_col='Risk_Level', p_adjust='bonferroni')
+# 비모수 사후검정 실시 결과 위험도 2말고는 차이가 있음을 확인 불가
+# 결과보여주기 위해 출력해야하는 부분
+posthoc
+```
+:::
+:::
+
+## Row {height=30%}
+### Column {width=50%}
+::: {.card title="📈 위험도별 주택가격 Bar Plot"}
+
+```{python}
+#| echo: false
+
+# 하나의 그래프로 평균과 중앙값 비교
+fig, ax = plt.subplots(figsize=(8, 5))
+mean_RiskLevel.sort_index().plot(kind='bar', position=0, width=0.4, color='salmon', edgecolor='black', label='Mean', ax=ax)
+median_RiskLevel.sort_index().plot(kind='bar', position=1, width=0.4, color='skyblue', edgecolor='black', label='Median', ax=ax)
+
+_=ax.set_xlabel('Risk_Level', fontsize=20)
+_=ax.set_ylabel('House Price', fontsize=20)
+_=ax.set_title('Mean vs Median House Price by Risk Level', fontsize=20)
+_=ax.grid(axis='y', linestyle='--', alpha=0.5)
+_=ax.set_xticks(range(len(mean_RiskLevel)))
+_=ax.set_xticklabels(mean_RiskLevel.index, rotation= 0)
+_=ax.legend(fontsize=15)
+
+plt.tight_layout()
+plt.show()
+
+```
+
+:::
+
+### Column {width=50%}
+::: {.card title="🔍 결과 해석"}
+
+- ✅ **위험도 2등급 주택은**  
+  📈 **다른 등급과 비교해 중앙값 기준으로 통계적으로 유의미하게 높은 가격**을 보였습니다.
+
+- ❗ 하지만,  
+  **그 외 위험도 간의 중앙값 가격 차이는 통계적으로 유의하지 않았습니다.**
+
+- 👉 따라서,  
+  **위험도 2에 해당하는 주택은 상대적으로 더 비싼 편이라고 해석할 수 있습니다.**
+
+**"⚠ 데이터 해석의 한계"**
+
+- 🧱 **부동산 가격은 자재 외에도**  
+  위치, 건물 크기, 연식, 토지 조건, 지역 수요 등 **다양한 요인의 영향을 받습니다.**
+
+- ❓ **즉, 자재 기반의 위험도만으로는**  
+  **주택 가격의 모든 변동성을 충분히 설명하기 어렵습니다.**
+
+- 📌 따라서,  
+  **위험도는 '가격에 영향을 주는 요인 중 하나'일 뿐이며,  
+  단독 요인으로 해석하는데 한계가 있다.**
+
+
+
+:::
+
+
+
+# 4. 보험료 산정 모델링
+
+## Row {height=40%}
+
+### Column {width=50%}
+::: {.card title="🔧 보험료 예측 모델"}
+
+```{python}
+#| echo: false
+
+import joblib
+dataloader = DataLoader()
+ames = dataloader.load_data()
+target = 'SalePrice'
+y = ames[target]
+
+ig_cols = ['PID','SalePrice','GeoRefNo','Prop_Addr','Latitude','Longitude','Risk_RoofMatl','Risk_Exterior1st','Risk_Exterior2nd','Risk_MasVnrType','Risk_WoodDeckSF']
+X = ames.drop(columns=ig_cols)
+
+# 학습/테스트 데이터 분할
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+predicted_model = joblib.load('../src/best_elastic_model/best_elastic_model.pkl')
+
+predicted = predicted_model.predict(X_test)
+
+test_df = pd.DataFrame(
+    {'Test_ID': list(y_test.index),
+        'Predicted': predicted,
+        'Truth': y_test,
+        'Resid': predicted - y_test})
+
+_ = plt.figure(figsize=(8, 5))
+_ = plt.scatter(test_df['Truth'], test_df['Predicted'], alpha=0.7, color='royalblue', label='Predicted vs Truth')
+_ = plt.plot([min(test_df['Truth']), max(test_df['Truth'])], [min(test_df['Predicted']), max(test_df['Predicted'])], 'r--', label='Estimated Line')
+_ = plt.xlabel('Truth', fontsize=20)
+_ = plt.ylabel('Predicted', fontsize=20)
+_ = plt.title('Trends of Residual')
+_ = plt.legend()
+_ = plt.grid(True)
+_ = plt.tight_layout()
+_ = plt.show()
+
+```
+
+- MSE:  25903.67405431691
+
+- RMSE: 160.94618372088513
+
+- $R^2$: 0.9999953867303233
+:::
+
+### Column {width=50%}
+::: {.card title="🗺️ 예측 보험료 지도 시각화"}
+```{python}
+#| echo: false
+
+import pandas as pd
+import plotly.graph_objects as go
+
+# 보험료 계산 함수
+def cal_rate_criterion(level):
+    if level == 1:
+        return 0.95
+    elif level == 2:
+        return 0.975
+    elif level == 3:
+        return 1
+    elif level == 4:
+        return 1.025
+    else:
+        return 1.05
+
+dataloader = DataLoader()
+ames = dataloader.load_data()
+
+# 예측 보험료 계산
+ratio_additional = 0.003
+ames['Estimate'] = (ames['SalePrice'] * ratio_additional) * ames['Risk_Level'].apply(cal_rate_criterion)
+
+# 보험료 20% 단위로 등급화
+quantiles = ames['Estimate'].quantile([0.2, 0.4, 0.6, 0.8])
+def classify_estimate(value):
+    if value <= quantiles[0.2]:
+        return '1. 매우 낮음'
+    elif value <= quantiles[0.4]:
+        return '2. 낮음'
+    elif value <= quantiles[0.6]:
+        return '3. 보통'
+    elif value <= quantiles[0.8]:
+        return '4. 높음'
+    else:
+        return '5. 매우 높음'
+
+ames['Estimate_Level'] = ames['Estimate'].apply(classify_estimate)
+
+# 색상 매핑 (흰색 → 진한 주황)
+color_map = {
+    '1. 매우 낮음': '#ffffff',
+    '2. 낮음': '#fff5cc',
+    '3. 보통': '#ffe066',
+    '4. 높음': '#ffb600',
+    '5. 매우 높음': '#ff8000'
+}
+
+# 지도 마커 구성
+traces = []
+for level, color in color_map.items():
+    df = ames[ames['Estimate_Level'] == level]
+    traces.append(go.Scattermapbox(
+        lat=df['Latitude'],
+        lon=df['Longitude'],
+        mode='markers',
+        marker=dict(size=7, color=color, opacity=0.75),
+        text='가격: $' + df['SalePrice'].astype(str) +
+             '<br>위험도: ' + df['Risk_Level'].astype(str) +
+             '<br>예측 보험료: $' + df['Estimate'].round(2).astype(str),
+        name=level
+    ))
+
+# 지도 레이아웃 설정
+layout_mapbox = dict(
+    mapbox=dict(
+        style="open-street-map",
+        center=dict(lat=42.0345, lon=-93.62),
+        zoom=11
+    ),
+    title=dict(
+        text='🔥 예측 보험료 등급별 주택 분포',
+        font=dict(size=22),
+        x=0.05, xanchor='left'
+    ),
+    margin=dict(l=20, r=20, t=60, b=20),
+    legend=dict(
+        title=dict(text='<b>예측 보험료 등급</b>'),
+        orientation='h',
+        yanchor='bottom',
+        y=0.02,
+        xanchor='center',
+        x=0.5,
+        bgcolor='rgba(255, 255, 255, 0.8)',
+        bordercolor='rgba(200, 200, 200, 0.8)',
+        borderwidth=1,
+        font=dict(size=12),
+        itemsizing='constant',
+    )
+)
+
+# 시각화 결과
+fig = go.Figure(data=traces, layout=layout_mapbox)
+fig  # QMD에서는 fig만 남겨야 정상 출력
+
+```
+:::
+
+## Row {height=20%}
+::: {.card title="💰 보험료 산정 공식"}
+$\mathbf{Y} =\big(P \cdot W_0 \big) \cdot W_1$
+
+- $\mathbf{Y}$: 예상 보험액
+- $P$: 예상 부동산 거래액
+- $W_0$: 연간 평균 산정 부가비율(0.03%)
+- $W_1$: 위험도별 가중치 평균
+
+**위험도별 가중치 책정 기준**
+
+
+|  | 위험도1 | 위험도2 | 위험도3 | 위험도4 | 위험도5 |
+| --- | --- | --- | --- | --- | --- |
+| 가중치 수치 | 0.95 | 0.975 | 1 | 1.025 | 1.05 |
+
+
+
+:::
+
+
+# 5. 손익분기점 분석
+
+
+## Row {height=70%}
+
+::: {.card title="📈 손익 시나리오 그래프"}
+```{python}
+#|echo : false
+
+dataloader = DataLoader()
+ames = dataloader.load_data()
+
+ratio_additional = 0.003
+overall_cal_rate = ames['Risk_Level'].apply(cal_rate_criterion)
+estimate = (ames['SalePrice'] * ratio_additional) * overall_cal_rate 
+estimate = pd.Series(estimate, name='Estimate')
+
+x_1_ticks_range = np.linspace(0.002, 0.004, len(ames))
+
+mean_estimate = estimate.mean()
+mean_sale_price = (ames['SalePrice'].mean() * 80) / 100
+
+
+fig, ax = plt.subplots(figsize=(8,5))
+
+_ = ax.axvline(x=0.00368*100, color='blue', linestyle='--')
+_ = ax.text((0.00368 + 0.00002)*100, 400, 'x = 0.368%',
+            rotation=0, color='blue', verticalalignment='center')
+_ = ax.plot(x_1_ticks_range*100, [mean_estimate]*len(x_1_ticks_range), color='red', label='mean estimate')
+_ = ax.plot(x_1_ticks_range*100, mean_sale_price*x_1_ticks_range, color='blue', label='mean sale price')
+
+_ = ax.set_xlabel('Fire Claim Rate')
+_ = ax.set_ylabel('Estimate')
+_ = ax.set_title('Break Even of Estimate by Fire Claim')
+
+_ = ax.grid(axis='y', linestyle='--', alpha=0.5)
+_ = plt.xticks(rotation=0)
+_ = plt.legend()
+
+```
+:::
+
+## Row {height=20%}
+::: {.card title="📌 결론 요약"}
+
+- 🔥 **화재(전소) 발생률이 약 0.368%를 초과하면 보험사는 손해를 볼 가능성 있음**
+    <tr> 👉 **즉, 10,000가구 중 37가구 이상 화재 발생 시 손실 발생**
+  
+- ✅ **0.368% 이하로 화재 발생률을 관리할 경우 수익 확보 가능**
+
+- 📊 **그러나** 본 수치는 **"평균 피해 금액"을 기반으로 계산**된 기대값이며,  
+  **절대값이 아닌 통계적 평균 기준**임 
+:::
+
+
